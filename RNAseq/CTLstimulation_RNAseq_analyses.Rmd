@@ -1,0 +1,267 @@
+---
+title: "CTLstimulation_RNAseq_analyses"
+author: "Arianne Richard"
+date: "12/3/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This file RNA-seq data from early reactivation of CTL. OTI CTL were re-activated for 0, 10, 20, 40 or 60 minutes on an anti-cCD3e coated plate before harvesting bulk RNA. Samples were generated for all conditions from 3 separate mice. RNA was prepared for sequencing using the Illumina TruSeq stranded mRNA kit and sequenced using PE 150bp sequencing on a HiSeq4000 in the CRUK-CI Genomics core.
+
+Visual examination of the log files from the mapping and read-counting demonstrated consistent, good alignment and exonic assignment rates (big loss to duplicates):
+
+Alignment: 92.0 - 92.8 %
+Assignment: 44.0 - 51.0 %
+
+## Load the data and annotation to have a look
+
+Let's load the mapped count data, the sample annotation, and have a look at the quality.
+
+```{r}
+library(edgeR)
+counts <- read.csv('counts_ArrayExpress.csv', header=TRUE, row.names=1)
+
+sanno <- read.table('sdrf.tsv', sep='\t', header=TRUE)
+sanno <- sanno[-which(duplicated(sanno$Source.Name)),]
+rownames(sanno) <- as.character(sanno$Source.Name)
+sanno$mouse <- as.character(sanno$Characteristics.individual.) ## this column is duplicated because the sdrf colnames are too annoying
+times <- strsplit(sanno$Characteristics.stimulus., ' ')
+times <- sapply(times, function(x) {x[2]})
+times[is.na(times)] <- "0m"
+sanno$time <- times
+
+## re-order annotation so aligns with counts table
+sanno <- sanno[colnames(counts),]
+
+samples <- rownames(sanno)
+
+## some QC
+ngenes <- apply(counts, 2, function(x) {length(which(x > 0))})
+stripchart(split(ngenes, sanno$time), vertical=TRUE, pch=20, ylab='number of genes mapped')
+
+stripchart(split(ngenes, sanno$mouse), vertical=TRUE, pch=20, ylab='number of genes mapped')
+
+ncounts <- apply(counts, 2, function(x) {log10(sum(x))})
+stripchart(split(ncounts, sanno$time), vertical=TRUE, pch=20, ylab='log10 number of reads mapped')
+stripchart(split(ncounts, sanno$mouse), vertical=TRUE, pch=20, ylab='log10 number of reads mapped')
+
+library(lattice)
+counts_ord <- counts
+colnames(counts_ord) <- paste0(sanno$time, sanno$mouse)
+counts_ord <- counts_ord[,order(colnames(counts_ord))]
+cormat <- cor(counts_ord)
+rgb.palette <- colorRampPalette(c("blue", "yellow"), space = "rgb")
+levelplot(cormat, xlab="", ylab="", col.regions=rgb.palette(120), cuts=100, at=seq(0,1,0.01))
+
+## add gene annotation
+fdat <- data.frame(GeneID=rownames(counts))
+name_map <- read.table('annotation_resources/ucsc_mm10_ensGene', 
+                       header=TRUE, sep='\t', quote='\"', comment.char="")
+name_map2 <- read.table('annotation_resources/ucsc_mm10_ensemblToGeneName', 
+                        row.names=1)
+rownames(name_map) <- as.character(name_map$name)
+name_map$symbol <- name_map2[rownames(name_map),1]
+name_map_simp <- name_map[,c('name2', 'symbol', 'chrom')]
+## get rid of multiple entries per gene (due to multiple transcripts in the original file)
+name_map_simp <- name_map_simp[!duplicated(name_map_simp),]
+rownames(name_map_simp) <- as.character(name_map_simp$name2)
+rownames(fdat) <- as.character(fdat$GeneID)
+fdat$symbol <- name_map_simp[rownames(fdat), 'symbol']
+fdat$Chr <- name_map_simp[rownames(fdat), 'chrom']
+length(which(is.na(fdat$symbol)))
+
+## add additional gene annotation that does not rely on ucsc table
+library(org.Mm.eg.db)
+ensgtoentr <- unlist(as.list(org.Mm.egENSEMBL2EG))
+x <- org.Mm.egSYMBOL
+mapped_genes <- mappedkeys(x)
+entrtosymbol <- unlist(as.list(x[mapped_genes]))
+
+fdat$entrID <- ensgtoentr[rownames(fdat)]
+fdat$symbol2 <- entrtosymbol[as.character(fdat$entrID)]
+length(which(is.na(fdat$symbol2)))
+## if use of this annotation is preferred, use fdat$symbol2 instead of fdat$symbol in generation of subsequent tables and plots
+```
+
+Looks like there are slightly fewer genes detected from the 20171215 mouse and this sample correlates less well with the others, but they are generally pretty good. 
+
+## Organize the data into a DGEList and filter
+
+We'll keep genes that have at least 10 counts in at least 3 samples. We'll use the cpm function and base it on the smallest library.
+
+```{r}
+
+y <- DGEList(counts=counts, samples=sanno)
+y$samples
+min(y$samples$lib.size)
+## smallest library is 19 million, so this means that 0.53 cpm would suffice to have ~10 counts 
+keep <- rowSums(cpm(y)>0.53) >= 3
+y <- y[keep, , keep.lib.sizes=FALSE]
+y <- calcNormFactors(y)
+
+boxplot(split(y$samples$norm.factors, y$samples$mouse))
+boxplot(split(y$samples$norm.factors, y$samples$time))
+
+
+```
+
+There is a definite time effect on the library sizes, and there seems to be a mouse effect as well. 
+
+## PCs
+
+Let's look at PCs of the data.
+
+```{r}
+logcpm <- cpm(y, prior.count=2, log=TRUE)
+pcs <- prcomp(t(logcpm))
+cols <- c('black', 'blue', 'darkgreen', 'orange', 'red')[as.numeric(factor(y$samples$time))]
+symbs <- c(1,2,3)[as.numeric(factor(y$samples$mouse))]
+plot(pcs$x[,1], pcs$x[,2], col=cols, pch=symbs, xlab='PC1', ylab='PC2')
+
+```
+
+The first PC picks up the mouse, and the second picks up the time-dependent re-activation, though these aren't totally orthogonal.
+
+## DE analysis
+
+Let's now perform some differential expression analyses.
+
+```{r}
+
+design <- model.matrix(~1+y$samples$mouse+y$samples$time)
+y <- estimateDisp(y, design)
+plotBCV(y)
+
+fit <- glmQLFit(y,design)
+plotQLDisp(fit)
+
+qlf10 <- glmQLFTest(fit, coef='y$samples$time10m')
+res10 <- data.frame(topTags(qlf10, n=nrow(y)))
+res10$symbol <- fdat[rownames(res10), 'symbol']
+write.table(res10, 'plots_and_tables/DE_10m.txt', sep='\t', quote=FALSE)
+head(res10)
+## nothing
+qlf20 <- glmQLFTest(fit, coef='y$samples$time20m')
+res20 <- data.frame(topTags(qlf20, n=nrow(y)))
+res20$symbol <- fdat[rownames(res20), 'symbol']
+write.table(res20, 'plots_and_tables/DE_20m.txt', sep='\t', quote=FALSE)
+head(res20)
+## very few genes DE
+qlf40 <- glmQLFTest(fit, coef='y$samples$time40m')
+res40 <- data.frame(topTags(qlf40, n=nrow(y)))
+res40$symbol <- fdat[rownames(res40), 'symbol']
+write.table(res40, 'plots_and_tables/DE_40m.txt', sep='\t', quote=FALSE)
+head(res40)
+## now we're getting more
+qlf60 <- glmQLFTest(fit, coef='y$samples$time60m')
+res60 <- data.frame(topTags(qlf60, n=nrow(y)))
+res60$symbol <- fdat[rownames(res60), 'symbol']
+write.table(res60, 'plots_and_tables/DE_60m.txt', sep='\t', quote=FALSE)
+head(res60)
+## tons
+```
+
+And we'll make stacked volcano plots of all results.
+
+```{r}
+
+png('plots_and_tables/volcanos.png', height=9, width=3, units='in', res=300)
+layout(matrix(c(1:4)), widths=c(1))
+par(mfrow=c(4,1), mgp=c(0,0.6,0), mar=c(0,0,0,1), cex.axis=1.3, oma=c(4,4,1,1))
+
+vol_plot <- function(res, title, xaxt='n'){
+  cols <- rep('black', length=nrow(res))
+  cols[which(res$FDR < 0.05)] <- 'darkred'
+  cols[which((res$FDR < 0.05) & (abs(res$logFC) > 1))] <- 'red'
+  plot(res$logFC, -log10(res$PValue), pch=20, col=cols,
+       xlim=c(-4,12), ylim=c(0,16), xlab='', ylab='', xaxt=xaxt)
+}
+
+vol_plot(res10, '10m v 0m')
+vol_plot(res20, '20m v 0m')
+vol_plot(res40, '40m v 0m')
+vol_plot(res60, '60m v 0m', xaxt='s')
+
+mtext(expression('log'[2]*' fold-change'), side=1, line=3, outer=TRUE, cex=1.2)
+mtext(expression('-log'[10]*' p value'), side=2, line=2, outer=TRUE, cex=1.2)
+
+dev.off()
+
+```
+
+
+We're particularly interested in when genes turn on, so let's filter for genes that increase in expression at least 2-fold compared to 0m at 60min. 
+
+```{r}
+siggenes60 <-  res60[res60$FDR < 0.05,]
+siggenes60_filt <- siggenes60[siggenes60$logFC > 1,]
+write.table(rownames(siggenes60_filt), 'plots_and_tables/DE_60m_up2x.txt', quote=FALSE, row.names=FALSE, col.names=FALSE)
+
+write.table(rownames(res60), 'plots_and_tables/background_list.txt', quote=FALSE, row.names=FALSE, col.names=FALSE)
+```
+
+Now we want to know what these genes do. We used the Panther classification tool on 23 December 2021 to look at protein class enrichment compared to all genes tested for DE, using the PANTHER Overrepresentation Test (Released 20210224), annotation PANTHER version 16.0 Released 2020-12-01, Fisher's Exact Test, FDR < 0.05.
+
+We can now read in the text output of this analysis.
+
+```{r}
+
+enrich <- read.table('plots_and_tables/60m 2xup Panther protein class enrichment.txt', sep='\t', skip=11, header=TRUE)
+
+enrich <- enrich[order(enrich$Client.Text.Box.Input..fold.Enrichment.),]
+enrich$namessimp <- unlist(lapply(strsplit(as.character(enrich$PANTHER.Protein.Class), split='(', fixed=TRUE), function(x) {x[1]}))
+
+pdf('plots_and_tables/60m2xup_PantherClassEnrichment.pdf', height=4, width=7)
+par(mar=c(5, 15, 2, 3)+0.1, cex.axis=0.8, cex.lab=1, mgp=c(1.5, 0.5, 0), font.main=1)
+barplot(height=enrich$Client.Text.Box.Input..fold.Enrichment., names.arg=as.character(enrich$namessimp), 
+        horiz=TRUE, xlab='fold enrichment', col='grey', las=1, 
+        main='')
+dev.off()
+
+
+```
+
+And we'll plot a few interesting genes. 
+
+```{r}
+y$samples$timeshort <- unlist(strsplit(y$samples$time, 'm'))
+
+plot_gene <- function(logcpm, split_fac, fdat, gene, ...){
+  genen <- rownames(fdat)[fdat$symbol %in% gene]
+  boxplot(split(logcpm[genen, ], split_fac), 
+             ylab='', ...)
+  stripchart(split(logcpm[genen, ], split_fac), add=TRUE, method='jitter', pch=16, col='dodgerblue', vertical=TRUE, cex=1.5)
+}
+
+## print without labels to more easily adjust label size when assembling figure in Illustrator
+pdf('plots_and_tables/selected_genes.pdf', height=4.5, width=9.5)
+par(mfrow=c(2,4), mgp=c(1,0.8,0), mar=c(2,3.4,1,0.6), bty='l', cex.lab=1.5, cex.axis=1.5)
+plot_gene(logcpm, y$samples$timeshort, fdat, 'Tnf', ylim=c(0,15))
+plot_gene(logcpm, y$samples$timeshort, fdat, 'Ifng', ylim=c(0,15))
+plot_gene(logcpm, y$samples$timeshort, fdat, 'Ccl3', ylim=c(0,15))
+plot_gene(logcpm, y$samples$timeshort, fdat, 'Csf2', ylim=c(0,15))
+plot_gene(logcpm, y$samples$timeshort, fdat, 'Gzmb', ylim=c(0,15))
+plot_gene(logcpm, y$samples$timeshort, fdat, 'Gzma', ylim=c(0,15))
+plot_gene(logcpm, y$samples$timeshort, fdat, 'Prf1', ylim=c(0,15))
+plot_gene(logcpm, y$samples$timeshort, fdat, 'Fasl', ylim=c(0,15))
+dev.off()
+
+pdf('plots_and_tables/selected_genes2.pdf', height=5, width=5)
+par(mfrow=c(2,2), mgp=c(1.6,0.5,0), mar=c(3,3.3,0.5,2), bty='l', cex.axis=1.4, 
+    cex.lab=1.8, las=2)
+plot_gene(logcpm, y$samples$time, fdat, 'Csf1', ylim=c(-5,15))
+plot_gene(logcpm, y$samples$time, fdat, 'Ccl1', ylim=c(-5,15))
+plot_gene(logcpm, y$samples$time, fdat, 'Ccl4', ylim=c(-5,15))
+plot_gene(logcpm, y$samples$time, fdat, 'Tnfsf14', ylim=c(-5,15))
+dev.off()
+
+```
+
+Write the session info.
+
+```{r}
+sessionInfo()
+```
