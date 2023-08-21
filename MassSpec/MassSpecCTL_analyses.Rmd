@@ -156,6 +156,9 @@ for(i in 1:ncol(raw_no_0_rep)){
 
 boxplot(raw_no_0_rep_mc,las=3, ylab='log2 no 0 median center intensity', col=rep(c('blue', 'purple', 'red', 'orange'), each=4))
 
+# fix colnames
+colnames(raw_no_0_rep) <- colnames(raw_no_0_rep_mc) <- colnames(pset)
+
 pset_no0 <- SummarizedExperiment(assays=list(raw=raw_no_0_rep, raw_medcent=raw_no_0_rep_mc, qc=assays(pset)$qc[-which(sums==0),]), colData=colData(pset), rowData=prot_info[-which(sums==0),])
 
 ```
@@ -282,49 +285,6 @@ dev.off()
 
 ```
 
-And what does this look like if we consider how the transcriptome changes upon restimulation? Let's compare the effect sizes of transcriptional changes with stimulation (previous RNAseq experiment using 60m v unstimulated) with protein changes at 4h upon transcription blockade. 
-
-```{r RNAseq_effect_size_comparison}
-
-a <- read.table('../RNAseq/plots_and_tables/DE_60m.txt')
-
-a <- a[a$symbol %in% CD3_res_noS$gene,]
-nu <- a$symbol[which(duplicated(a$symbol))]
-a <- a[!a$symbol %in% nu,]
-b <- CD3_res_noS[CD3_res_noS$gene %in% a$symbol,]
-nu <- b$gene[which(duplicated(b$gene))]
-b <- b[!b$gene %in% nu,]
-df <- merge(a, b, by.x='symbol', by.y='gene')
-
-## and we want to label some points - again, positions have been optimized after initial run
-rns <- which(df$logFC > 3)
-poses <- rep(1, times=length(rns))
-poses[which(df$symbol[rns] =='Ifng')] <- 3
-poses[which(df$symbol[rns] =='Tnfsf9')] <- 3
-poses[which(df$symbol[rns] =='Tnf')] <- 3
-poses[which(df$symbol[rns] =='Nr4a1')] <- 4
-poses[which(df$symbol[rns] =='Nr4a2')] <- 4
-poses[which(df$symbol[rns] =='Csf2')] <- 4
-poses[which(df$symbol[rns] =='Egr3')] <- 4
-textcol <- rep('black', length(rns))
-
-cols <- rep('grey60', times=nrow(df))
-cols[which(df$FDR < 0.05)] <- 'deepskyblue'
-cols[which(df$fdr < 0.05)] <- 'springgreen3'
-cols[which((df$FDR < 0.05) & (df$fdr < 0.05)) ] <- 'deeppink'
-
-make.italic <- function(x) {as.expression(lapply(x, function(y) bquote(italic(.(y)))))}
-
-png('plots_and_tables/effectsizes_RNAstimvunstim_CD3AvD_replace0s_noSingles.png', height=4, width=4, unit='in', res=300)
-par(cex=0.5, bty='l', mgp=c(3, 1, 0), mar=c(6, 6, 2, 2), cex.axis=1.8, cex.lab=2.2)
-plot(df$logFC, df$estimate, pch=16, col=cols, xlab='RNA: stimulated v resting', ylab='Protein: stimulated ActD v DMSO')
-text(df$logFC[rns], df$estimate[rns], labels=make.italic(df$symbol[rns]), pos=poses, col=textcol, cex=1.2)
-abline(h=0, lty=3)
-abline(v=0, lty=3)
-dev.off()
-
-```
-
 And how does ActD treatment compare between stimulated and unstimulated cells? Start with a correlation test.
 
 ```{r ActD_effect_size_comp}
@@ -426,6 +386,12 @@ par(bty='l')
 boxplot(effects, outline=FALSE, ylim=c(bot, top), ylab=expression('log'[2]*' (fold-change)'))
 stripchart(effects, add=TRUE, method='jitter', pch=1, col='black', vertical=TRUE, cex=1)
 dev.off()
+
+# print text file with values
+all_genes <- c(cytokines, receptors, cytolytic)
+df <- CD3_res_noS[all_genes, c('gene', 'estimate')]
+df$category <- c(rep('cytokine', length(cytokines)), rep('cytokine_receptor', length(receptors)), rep('cytolytic', length(cytolytic)))
+write.table(df, file='plots_and_tables/source_data_cytokines_cytolytic.txt', quote=FALSE, sep='\t')
 
 ```
 
@@ -580,6 +546,8 @@ p +
   scale_y_continuous(limits = c(-0.5, 30))
 dev.off()
 
+write.table(p$data, 'plots_and_tables/source_data_XCL1.txt', quote=FALSE, sep='\t')
+
 pdf('plots_and_tables/Ifng.pdf', height=3.5, width=3)
 p <- plot_prot(pset=pset, geneID='Ifng', assay='raw_medcent', prelog=TRUE)
 p + 
@@ -588,6 +556,7 @@ p +
   scale_y_continuous(limits = c(-0.5, 30))
 dev.off()
 
+write.table(p$data, 'plots_and_tables/source_data_IFNG.txt', quote=FALSE, sep='\t')
 
 pdf('plots_and_tables/Gzmb.pdf', height=3.5, width=3)
 p <- plot_prot(pset=pset, geneID='Gzmb', assay='raw_medcent', prelog=TRUE)
@@ -597,6 +566,8 @@ p +
   scale_y_continuous(limits = c(-0.5, 30))
 dev.off()
 
+write.table(p$data, 'plots_and_tables/source_data_GZMB.txt', quote=FALSE, sep='\t')
+
 pdf('plots_and_tables/Prf1.pdf', height=3.5, width=3)
 p <- plot_prot(pset=pset, geneID='Prf1', assay='raw_medcent', prelog=TRUE)
 p + 
@@ -604,6 +575,8 @@ p +
   theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1)) +
   scale_y_continuous(limits = c(-0.5, 30))
 dev.off()
+
+write.table(p$data, 'plots_and_tables/source_data_PRF1.txt', quote=FALSE, sep='\t')
 
 ```
 
